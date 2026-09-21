@@ -1,0 +1,12 @@
+# Normalize line endings: LF in repo and working tree (prettier uses endOfLine: lf).
+* text=auto eol=lf
+
+# Binary assets — never touch
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary
