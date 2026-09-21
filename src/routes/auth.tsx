@@ -110,15 +110,6 @@ function AuthPage() {
     }
   };
 
-  const handleGoogle = async () => {
-    reset();
-    const { error } = await supabase.auth.signInWithOAuth({
-      provider: "google",
-      options: { redirectTo: window.location.origin },
-    });
-    if (error) setError("Google 登录失败，请重试");
-  };
-
   return (
     <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-background bg-grid-glow px-4 py-10">
       <div className="w-full max-w-sm rounded-2xl border border-border bg-card/80 p-8 shadow-2xl backdrop-blur">
@@ -209,15 +200,6 @@ function AuthPage() {
             未绑定邮箱的手机号账号暂不支持自助找回密码，请妥善保管密码，后续可在账号设置中补绑邮箱。
           </p>
         )}
-
-        <div className="my-4 flex items-center gap-3 text-xs text-muted-foreground">
-          <div className="h-px flex-1 bg-border" />或
-          <div className="h-px flex-1 bg-border" />
-        </div>
-
-        <Button type="button" variant="outline" className="w-full" onClick={handleGoogle}>
-          使用 Google 继续
-        </Button>
 
         <p className="mt-4 text-center text-sm text-muted-foreground">
           {mode === "signin" ? "还没有账号？" : "已有账号？"}
