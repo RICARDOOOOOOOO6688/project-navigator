@@ -160,19 +160,12 @@ export function ProjectChatWorkspace({
       });
 
       if (!res.ok || !res.body) {
-        let message = `请求失败（${res.status}）`;
-        if (res.status === 400) {
-          const payload = (await res.json().catch(() => null)) as {
-            message?: string;
-          } | null;
-          message = payload?.message ?? "请求参数无效。";
-        } else if (res.status === 503) {
-          message =
-            "尚未配置 Dify Agent：请在项目设置中添加密钥 DIFY_API_KEY（私有部署还需 DIFY_API_BASE），配置完成后即可开始对话。";
-        } else {
-          const detail = await res.text().catch(() => "");
-          if (detail) message = detail.slice(0, 200);
-        }
+        // The gateway returns safe { code, message } JSON for all failures.
+        const payload = (await res.json().catch(() => null)) as {
+          code?: string;
+          message?: string;
+        } | null;
+        const message = payload?.message ?? `请求失败（${res.status}）`;
         setSendState({ status: "error", userText: trimmed, message });
         return;
       }
