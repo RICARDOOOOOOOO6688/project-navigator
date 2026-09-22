@@ -1,13 +1,21 @@
 // Dify Executor — the only place that talks to Dify.
 //
-// Responsibilities: attach the secret, POST /chat-messages in streaming mode,
-// parse the SSE stream, forward deltas, track conversation_id, normalize HTTP /
-// network / timeout failures into GatewayError, and sanitize error text.
+// Responsibilities: normalize the provider base URL, POST /chat-messages in
+// streaming mode, parse the SSE stream, forward deltas, track conversation_id,
+// capture usage when present, and normalize HTTP / network / timeout / malformed
+// failures into GatewayError with sanitized text.
 
 import { GatewayError } from "./errors";
 import { sanitizeSecretText } from "./secrets.server";
 
-const DEFAULT_TIMEOUT_MS = 120_000;
+// Local/self-hosted models can be slow. Default 10 minutes; override with the
+// optional DIFY_TIMEOUT_MS env var (no restart needed for requests, but env
+// changes still require a dev-server restart).
+function resolveTimeoutMs(override?: number): number {
+  if (typeof override === "number" && override > 0) return override;
+  const raw = Number(process.env["DIFY_TIMEOUT_MS"]);
+  return Number.isFinite(raw) && raw > 0 ? raw : 600_000;
+}
 
 export interface DifyRunInput {
   baseUrl: string;
@@ -20,17 +28,43 @@ export interface DifyRunInput {
   timeoutMs?: number;
 }
 
+export interface DifyUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+}
+
 export interface DifyRunResult {
   answer: string;
   conversationId: string | null;
+  /** Only set when Dify actually reported usage. Never fabricated. */
+  usage?: DifyUsage;
+}
+
+/**
+ * Normalize a provider base URL:
+ *   - strip trailing slashes
+ *   - empty or "/" path → append /v1
+ *   - already ending in /v1 → left as is
+ * e.g. https://api.dify.ai    → https://api.dify.ai/v1
+ *      https://api.dify.ai/v1 → https://api.dify.ai/v1
+ */
+export function normalizeBaseUrl(raw: string): string {
+  const trimmed = raw.trim().replace(/\/+$/, "");
+  try {
+    const u = new URL(trimmed);
+    if (u.pathname === "" || u.pathname === "/") return `${u.origin}/v1`;
+    return trimmed;
+  } catch {
+    return trimmed;
+  }
 }
 
 export async function executeDifyChat(
   input: DifyRunInput,
   onDelta: (delta: string) => void,
 ): Promise<DifyRunResult> {
-  const endpoint = `${input.baseUrl.replace(/\/+$/, "")}/chat-messages`;
-  const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const endpoint = `${normalizeBaseUrl(input.baseUrl)}/chat-messages`;
+  const timeoutMs = resolveTimeoutMs(input.timeoutMs);
 
   const controller = new AbortController();
   let timedOut = false;
@@ -65,7 +99,7 @@ export async function executeDifyChat(
     clearTimeout(timer);
     if (timedOut) throw new GatewayError("DIFY_TIMEOUT", "connect timeout");
     throw new GatewayError(
-      "DIFY_UNAVAILABLE",
+      "DIFY_REQUEST_FAILED",
       sanitizeSecretText((err as Error).message, [input.apiKey]),
     );
   }
@@ -74,7 +108,7 @@ export async function executeDifyChat(
     const detail = await res.text().catch(() => "");
     clearTimeout(timer);
     throw new GatewayError(
-      "DIFY_ERROR",
+      "DIFY_REQUEST_FAILED",
       sanitizeSecretText(`HTTP ${res.status} ${detail.slice(0, 300)}`, [input.apiKey]),
     );
   }
@@ -84,6 +118,9 @@ export async function executeDifyChat(
   let buffer = "";
   let answer = "";
   let conversationId: string | null = null;
+  let sawEvent = false;
+  let inputTokens: number | undefined;
+  let outputTokens: number | undefined;
 
   const handleLine = (line: string): void => {
     const trimmed = line.trim();
@@ -96,7 +133,9 @@ export async function executeDifyChat(
     } catch {
       return; // malformed chunk
     }
+    sawEvent = true;
     if (typeof event["conversation_id"] === "string") conversationId = event["conversation_id"];
+
     const name = event["event"];
     const delta = event["answer"];
     if (
@@ -106,9 +145,17 @@ export async function executeDifyChat(
       if (name === "message_replace") answer = "";
       answer += delta;
       onDelta(delta);
+    } else if (name === "message_end") {
+      const metadata = event["metadata"] as
+        { usage?: { prompt_tokens?: unknown; completion_tokens?: unknown } } | undefined;
+      const usage = metadata?.usage;
+      if (usage && typeof usage === "object") {
+        if (typeof usage.prompt_tokens === "number") inputTokens = usage.prompt_tokens;
+        if (typeof usage.completion_tokens === "number") outputTokens = usage.completion_tokens;
+      }
     } else if (name === "error") {
       const msg = (event["message"] as string) ?? (event["code"] as string) ?? "unknown error";
-      throw new GatewayError("DIFY_ERROR", sanitizeSecretText(msg, [input.apiKey]));
+      throw new GatewayError("DIFY_REQUEST_FAILED", sanitizeSecretText(msg, [input.apiKey]));
     }
   };
 
@@ -126,12 +173,24 @@ export async function executeDifyChat(
     if (timedOut) throw new GatewayError("DIFY_TIMEOUT", "stream timeout");
     if (err instanceof GatewayError) throw err;
     throw new GatewayError(
-      "DIFY_ERROR",
+      "DIFY_REQUEST_FAILED",
       sanitizeSecretText((err as Error).message, [input.apiKey]),
     );
   } finally {
     clearTimeout(timer);
   }
 
-  return { answer, conversationId };
+  if (!sawEvent) {
+    throw new GatewayError("DIFY_RESPONSE_INVALID", "no SSE data events");
+  }
+
+  const usage: DifyUsage = {};
+  if (inputTokens !== undefined) usage.inputTokens = inputTokens;
+  if (outputTokens !== undefined) usage.outputTokens = outputTokens;
+
+  return {
+    answer,
+    conversationId,
+    ...(inputTokens !== undefined || outputTokens !== undefined ? { usage } : {}),
+  };
 }

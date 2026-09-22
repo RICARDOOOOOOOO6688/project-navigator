@@ -1,5 +1,5 @@
-// Shared gateway types. Safe metadata only — `apiKey` lives on the internal
-// execution plan and never crosses back to the client.
+// Shared gateway types, aligned with the authoritative ai_* control plane.
+// `apiKey` lives only on the internal execution plan and never crosses back.
 
 export interface ThreadRecord {
   id: string;
@@ -10,20 +10,26 @@ export interface ThreadRecord {
   dify_conversation_id: string | null;
 }
 
+/** public.ai_workflows */
 export interface WorkflowRecord {
   id: string;
   key: string;
-  label: string;
-  dify_app_id: string | null;
-  app_type: "workflow" | "chatflow";
+  name: string;
+  description: string;
   secret_ref: string | null;
-  secret_source: string;
+  provider_key: string | null;
   enabled: boolean;
+  sort_order: number;
 }
 
-export interface ModelRecord {
-  model_key: string;
-  display_name: string;
+/** public.ai_providers */
+export interface ProviderRecord {
+  id: string;
+  key: string;
+  name: string;
+  description: string;
+  base_url: string | null;
+  secret_ref: string | null;
   enabled: boolean;
 }
 
@@ -34,32 +40,20 @@ export interface ResolveContext {
   stage: string | null;
   /** Client may request a known workflow key; the server still resolves it. */
   workflowKey?: string | null;
-  /** Metadata only in this phase — Dify decides the actual model. */
-  modelKey?: string | null;
 }
 
 export interface ExecutionPlan {
-  workflow: {
-    id: string;
-    key: string;
-    label: string;
-    app_type: string;
-    dify_app_id: string;
-  };
+  workflow: { id: string; key: string; name: string };
+  provider: { id: string; key: string; name: string; baseUrl: string };
   target: {
-    kind: "dify";
     /** Dify base URL (never returned to the client). */
     baseUrl: string;
-    appId: string;
     /** SECRET — server-side only, never returned or logged. */
     apiKey: string;
   };
-  /** Informational; the model is not called directly in this phase. */
-  model: { key: string; displayName: string } | null;
   meta: {
     workflowKey: string;
     stage: string | null;
-    appType: string;
     executionTarget: "dify";
   };
 }

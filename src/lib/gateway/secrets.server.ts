@@ -1,20 +1,13 @@
 // Server-only secret resolution + sanitization for the AI Gateway.
 // The resolved value is only ever held in a local variable; it is never logged,
-// returned, or persisted.
+// returned, or persisted. The control plane has no `secret_source` column, so a
+// `secret_ref` is always resolved against the process environment by name.
 
 export type SecretResolution = { ok: true; value: string } | { ok: false; reason: string };
 
-export function resolveSecret(
-  secretRef: string | null | undefined,
-  secretSource: string,
-): SecretResolution {
+export function resolveSecret(secretRef: string | null | undefined): SecretResolution {
   const ref = secretRef?.trim();
   if (!ref) return { ok: false, reason: "missing secret_ref" };
-
-  if (secretSource === "supabase_vault") {
-    // Out of scope for this phase — never fake success.
-    return { ok: false, reason: "supabase_vault not connected" };
-  }
 
   const value = process.env[ref]?.trim();
   if (!value) return { ok: false, reason: `env binding ${ref} not found` };

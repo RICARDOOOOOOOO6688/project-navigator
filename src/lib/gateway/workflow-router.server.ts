@@ -1,26 +1,20 @@
 // Workflow Router — turns a request context into a concrete execution plan by
-// reading the Control Plane (Supabase `workflows`, optional `models`).
+// reading the authoritative control plane:
 //
-// No silent fallback: a missing / disabled / unconfigured workflow, or an
-// unresolvable secret, is an explicit GatewayError. The client never supplies
-// the Dify App ID or secret — only an optional allow-listed workflow key.
+//   ai_workflows (by key)  →  ai_providers (by provider_key)  →  secret_ref
+//
+// No silent fallback: missing / disabled / unconfigured records and an
+// unresolvable secret are explicit GatewayErrors. The client never supplies the
+// provider, base URL or secret — only an optional allow-listed workflow key.
 
 import { gatewayDb } from "./db.server";
 import { GatewayError } from "./errors";
 import { resolveSecret } from "./secrets.server";
 import { isKnownWorkflowKey, workflowKeyForStage } from "./stage-workflow-map";
-import type { ExecutionPlan, ModelRecord, ResolveContext, WorkflowRecord } from "./types";
-
-function difyBaseUrl(): string {
-  return (
-    process.env["DIFY_API_BASE"] ??
-    process.env["DIFY_API_URL"] ??
-    "https://api.dify.ai/v1"
-  ).replace(/\/+$/, "");
-}
+import type { ExecutionPlan, ProviderRecord, ResolveContext, WorkflowRecord } from "./types";
 
 export async function resolveWorkflow(ctx: ResolveContext): Promise<ExecutionPlan> {
-  // 1. Server decides the workflow key. A client-supplied key must be allow-listed.
+  // 1. Server decides the workflow key; a client key must be allow-listed.
   let workflowKey: string;
   if (ctx.workflowKey) {
     if (!isKnownWorkflowKey(ctx.workflowKey)) {
@@ -31,63 +25,51 @@ export async function resolveWorkflow(ctx: ResolveContext): Promise<ExecutionPla
     workflowKey = workflowKeyForStage(ctx.stage);
   }
 
-  // 2. Load the workflow record from the control plane.
   const db = gatewayDb();
-  const { data, error } = await db
-    .from("workflows")
-    .select("*")
-    .eq("key", workflowKey)
-    .maybeSingle();
-  if (error) throw new GatewayError("WORKFLOW_NOT_FOUND", error.message);
-  if (!data) throw new GatewayError("WORKFLOW_NOT_FOUND", `key=${workflowKey}`);
-  const workflow = data as unknown as WorkflowRecord;
 
-  // 3. Explicit configuration gates — never fall back to a fake workflow.
+  // 2. Workflow record from ai_workflows.
+  const wfRes = await db.from("ai_workflows").select("*").eq("key", workflowKey).maybeSingle();
+  if (wfRes.error) throw new GatewayError("WORKFLOW_NOT_FOUND", wfRes.error.message);
+  if (!wfRes.data) throw new GatewayError("WORKFLOW_NOT_FOUND", `key=${workflowKey}`);
+  const workflow = wfRes.data as unknown as WorkflowRecord;
+
   if (!workflow.enabled) throw new GatewayError("WORKFLOW_DISABLED", `key=${workflow.key}`);
-  if (!workflow.dify_app_id?.trim()) {
-    throw new GatewayError("WORKFLOW_NOT_CONFIGURED", "missing dify_app_id");
-  }
-  if (!workflow.secret_ref?.trim()) {
-    throw new GatewayError("SECRET_NOT_CONFIGURED", "missing secret_ref");
+  if (!workflow.provider_key?.trim()) {
+    throw new GatewayError("PROVIDER_NOT_FOUND", "workflow has no provider_key");
   }
 
-  const secret = resolveSecret(workflow.secret_ref, workflow.secret_source);
+  // 3. Provider record from ai_providers via the logical provider_key link.
+  const pvRes = await db
+    .from("ai_providers")
+    .select("*")
+    .eq("key", workflow.provider_key)
+    .maybeSingle();
+  if (pvRes.error) throw new GatewayError("PROVIDER_NOT_FOUND", pvRes.error.message);
+  if (!pvRes.data) throw new GatewayError("PROVIDER_NOT_FOUND", `key=${workflow.provider_key}`);
+  const provider = pvRes.data as unknown as ProviderRecord;
+
+  if (!provider.enabled) throw new GatewayError("PROVIDER_DISABLED", `key=${provider.key}`);
+  if (!provider.base_url?.trim()) {
+    throw new GatewayError("PROVIDER_NOT_CONFIGURED", "provider has no base_url");
+  }
+
+  // 4. Secret: workflow secret_ref first, then provider secret_ref.
+  const ref = workflow.secret_ref?.trim() || provider.secret_ref?.trim() || null;
+  const secret = resolveSecret(ref);
   if (!secret.ok) throw new GatewayError("SECRET_NOT_CONFIGURED", secret.reason);
 
-  // 4. Optional model metadata. The model is NOT called in this phase; Dify
-  //    decides the underlying model. An unknown key is simply not attached.
-  let model: ExecutionPlan["model"] = null;
-  if (ctx.modelKey && ctx.modelKey !== "default") {
-    const res = await db
-      .from("models")
-      .select("model_key, display_name, enabled")
-      .eq("model_key", ctx.modelKey)
-      .maybeSingle();
-    if (res.data) {
-      const rec = res.data as unknown as ModelRecord;
-      model = { key: rec.model_key, displayName: rec.display_name };
-    }
-  }
-
   return {
-    workflow: {
-      id: workflow.id,
-      key: workflow.key,
-      label: workflow.label,
-      app_type: workflow.app_type,
-      dify_app_id: workflow.dify_app_id,
+    workflow: { id: workflow.id, key: workflow.key, name: workflow.name },
+    provider: {
+      id: provider.id,
+      key: provider.key,
+      name: provider.name,
+      baseUrl: provider.base_url,
     },
-    target: {
-      kind: "dify",
-      baseUrl: difyBaseUrl(),
-      appId: workflow.dify_app_id,
-      apiKey: secret.value,
-    },
-    model,
+    target: { baseUrl: provider.base_url, apiKey: secret.value },
     meta: {
       workflowKey: workflow.key,
       stage: ctx.stage,
-      appType: workflow.app_type,
       executionTarget: "dify",
     },
   };

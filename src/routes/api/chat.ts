@@ -60,7 +60,7 @@ export const Route = createFileRoute("/api/chat")({
             return jsonError(err.code, err.userMessage, err.httpStatus);
           }
           console.error("[api/chat] unexpected error", (err as Error).message);
-          return jsonError("DIFY_ERROR", "AI 服务返回错误，请重试。", 502);
+          return jsonError("DIFY_REQUEST_FAILED", "AI 服务请求失败，请稍后重试。", 502);
         }
       },
     },

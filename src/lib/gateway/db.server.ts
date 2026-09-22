@@ -1,7 +1,7 @@
 // Service-role Supabase client for the AI Gateway (server-only).
 //
-// The gateway reads control-plane config (workflows/models/user_quotas) and
-// writes run records (activity_events), which the user-scoped client cannot do
+// The gateway reads the authoritative control plane (ai_workflows/ai_providers)
+// and writes run records (usage_events), which the user-scoped client cannot do
 // under RLS. Every query still filters by user_id explicitly.
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";

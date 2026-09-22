@@ -1,14 +1,14 @@
 // AI Gateway — the single server-side entry point for AI execution.
 //
-//   request → auth context → ownership → Workflow Router (Control Plane)
-//           → quota check (read-only) → Dify Executor → stream back
-//           → persist messages → record AI Run in activity_events
+//   request → auth context → ownership → Workflow Router (ai_workflows → ai_providers)
+//           → Dify Executor → stream back → persist messages
+//           → record the run in usage_events
 //
-// It never trusts client-supplied workflow/model for execution and never
-// returns secret material.
+// No quota check, no activity_events. Tokens are written only when Dify actually
+// reports usage; otherwise the token columns are omitted (never fabricated).
 
 import { gatewayDb } from "./db.server";
-import { executeDifyChat } from "./dify-executor.server";
+import { executeDifyChat, type DifyUsage } from "./dify-executor.server";
 import { GatewayError, isGatewayError } from "./errors";
 import { sanitizeSecretText } from "./secrets.server";
 import type { ThreadRecord } from "./types";
@@ -18,49 +18,52 @@ export interface ChatRunInput {
   userId: string;
   threadId: string;
   message: string;
-  /** Untrusted client hints — metadata / allow-listed routing only. */
+  /** Untrusted client hints. Not used for routing; kept for future use. */
   modelKey?: unknown;
   workflowKey?: unknown;
 }
 
-interface RunRecord {
+interface UsageRecord {
   userId: string;
   projectId: string | null;
-  threadId: string;
   workflowKey: string;
-  executionTarget: string;
-  status: "success" | "error";
-  latencyMs: number;
-  errorCode: string | null;
+  providerKey: string;
+  usage?: DifyUsage;
 }
 
-/** Best-effort AI Run log. Secrets are never included. */
-async function recordRun(record: RunRecord): Promise<void> {
+/**
+ * Append a run row to usage_events using only the columns that exist:
+ * user_id, project_id, workflow_key, model_key, provider_key,
+ * input_tokens, output_tokens, created_at.
+ *
+ * model_key is always null (ai_models is a catalog and does not drive execution).
+ * input_tokens / output_tokens are included only when Dify reported them; if
+ * omitted the column default (0) applies — that 0 means "not measured".
+ */
+async function recordUsage(record: UsageRecord): Promise<void> {
   try {
     await gatewayDb()
-      .from("activity_events")
+      .from("usage_events")
       .insert({
-        type: "ai_run",
-        title: `${record.workflowKey} · ${record.status === "success" ? "成功" : "失败"}`,
-        actor_user_id: record.userId,
-        metadata: {
-          workflow: record.workflowKey,
-          execution_target: record.executionTarget,
-          status: record.status,
-          latency_ms: record.latencyMs,
-          project_id: record.projectId,
-          thread_id: record.threadId,
-          error: record.errorCode,
-        },
+        user_id: record.userId,
+        project_id: record.projectId,
+        workflow_key: record.workflowKey,
+        model_key: null,
+        provider_key: record.providerKey,
+        ...(record.usage?.inputTokens !== undefined
+          ? { input_tokens: record.usage.inputTokens }
+          : {}),
+        ...(record.usage?.outputTokens !== undefined
+          ? { output_tokens: record.usage.outputTokens }
+          : {}),
       });
   } catch (err) {
-    console.error("[ai-gateway] failed to record run", (err as Error).message);
+    console.error("[ai-gateway] failed to record usage", (err as Error).message);
   }
 }
 
 export async function runChat(input: ChatRunInput): Promise<Response> {
   const db = gatewayDb();
-  const startedMs = Date.now();
 
   // 1. Ownership: the thread must belong to the caller.
   const { data: threadRow, error: threadError } = await db
@@ -69,11 +72,11 @@ export async function runChat(input: ChatRunInput): Promise<Response> {
     .eq("id", input.threadId)
     .eq("user_id", input.userId)
     .maybeSingle();
-  if (threadError) throw new GatewayError("DIFY_ERROR", threadError.message);
+  if (threadError) throw new GatewayError("DIFY_REQUEST_FAILED", threadError.message);
   if (!threadRow) throw new GatewayError("FORBIDDEN", "thread not found or not owned");
   const thread = threadRow as unknown as ThreadRecord;
 
-  // 2. Workflow Router reads the Control Plane and returns an execution plan.
+  // 2. Workflow Router reads ai_workflows → ai_providers and resolves the secret.
   const resolved = await resolveWorkflow({
     userId: input.userId,
     projectId: thread.project_id,
@@ -83,43 +86,16 @@ export async function runChat(input: ChatRunInput): Promise<Response> {
       typeof input.workflowKey === "string" && input.workflowKey.trim()
         ? input.workflowKey.trim()
         : null,
-    modelKey: typeof input.modelKey === "string" ? input.modelKey : null,
   });
 
-  // 3. Quota: read-only check. No token consumption, no fake counters.
-  const quotaRes = await db
-    .from("user_quotas")
-    .select("token_limit, token_used")
-    .eq("user_id", input.userId)
-    .maybeSingle();
-  if (quotaRes.data) {
-    const quota = quotaRes.data as unknown as {
-      token_limit: number | null;
-      token_used: number | null;
-    };
-    if (quota.token_limit != null && (quota.token_used ?? 0) >= quota.token_limit) {
-      await recordRun({
-        userId: input.userId,
-        projectId: thread.project_id,
-        threadId: thread.id,
-        workflowKey: resolved.meta.workflowKey,
-        executionTarget: resolved.meta.executionTarget,
-        status: "error",
-        latencyMs: Date.now() - startedMs,
-        errorCode: "QUOTA_EXCEEDED",
-      });
-      throw new GatewayError("QUOTA_EXCEEDED");
-    }
-  }
-
-  // 4. Persist the user message before execution (kept from the previous flow).
+  // 3. Persist the user message before execution.
   const { error: insertUserError } = await db.from("messages").insert({
     thread_id: thread.id,
     user_id: input.userId,
     role: "user",
     content: input.message,
   });
-  if (insertUserError) throw new GatewayError("DIFY_ERROR", insertUserError.message);
+  if (insertUserError) throw new GatewayError("DIFY_REQUEST_FAILED", insertUserError.message);
 
   const encoder = new TextEncoder();
 
@@ -127,8 +103,7 @@ export async function runChat(input: ChatRunInput): Promise<Response> {
     async start(controller) {
       let answer = "";
       let conversationId: string | null = null;
-      let status: "success" | "error" = "success";
-      let errorCode: string | null = null;
+      let usage: DifyUsage | undefined;
 
       try {
         const result = await executeDifyChat(
@@ -150,6 +125,7 @@ export async function runChat(input: ChatRunInput): Promise<Response> {
           },
         );
         conversationId = result.conversationId;
+        usage = result.usage;
         if (!answer.trim()) {
           controller.enqueue(
             encoder.encode(
@@ -158,15 +134,14 @@ export async function runChat(input: ChatRunInput): Promise<Response> {
           );
         }
       } catch (err) {
-        status = "error";
-        errorCode = isGatewayError(err) ? err.code : "DIFY_ERROR";
         const safe = sanitizeSecretText(err instanceof Error ? err.message : String(err), [
           resolved.target.apiKey,
         ]);
-        console.error("[ai-gateway] dify run failed", errorCode, safe);
+        const code = isGatewayError(err) ? err.code : "DIFY_REQUEST_FAILED";
+        console.error("[ai-gateway] dify run failed", code, safe);
         controller.enqueue(
           encoder.encode(
-            `\n\n[错误] ${isGatewayError(err) ? err.userMessage : "AI 服务返回错误，请重试。"}`,
+            `\n\n[错误] ${isGatewayError(err) ? err.userMessage : "AI 服务请求失败，请稍后重试。"}`,
           ),
         );
       } finally {
@@ -191,15 +166,12 @@ export async function runChat(input: ChatRunInput): Promise<Response> {
           console.error("[ai-gateway] persist failed", (err as Error).message);
         }
 
-        await recordRun({
+        await recordUsage({
           userId: input.userId,
           projectId: thread.project_id,
-          threadId: thread.id,
           workflowKey: resolved.meta.workflowKey,
-          executionTarget: resolved.meta.executionTarget,
-          status,
-          latencyMs: Date.now() - startedMs,
-          errorCode,
+          providerKey: resolved.provider.key,
+          ...(usage ? { usage } : {}),
         });
 
         controller.close();
