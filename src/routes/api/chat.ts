@@ -37,7 +37,13 @@ export const Route = createFileRoute("/api/chat")({
         } = await supabase.auth.getUser();
         if (authError || !user) return jsonError("AUTH_REQUIRED", "请先登录。", 401);
 
-        let body: { threadId?: string; message?: string; model?: unknown; workflowKey?: unknown };
+        let body: {
+          threadId?: string;
+          message?: string;
+          model?: unknown;
+          executionMode?: unknown;
+          workflowKey?: unknown;
+        };
         try {
           body = (await request.json()) as typeof body;
         } catch {
@@ -52,6 +58,7 @@ export const Route = createFileRoute("/api/chat")({
             userId: user.id,
             threadId: body.threadId,
             message: body.message.trim(),
+            executionMode: body.executionMode,
             modelKey: body.model,
             workflowKey: body.workflowKey,
           });

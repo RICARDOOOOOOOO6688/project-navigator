@@ -43,6 +43,7 @@ import {
 } from "@/components/ai-elements/prompt-input";
 import { Shimmer } from "@/components/ai-elements/shimmer";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Select,
   SelectContent,
@@ -50,7 +51,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { DEFAULT_MODEL_KEY, MODEL_CATALOG, isModelKey, type ModelKey } from "@/lib/models";
+import { listDirectModels, listProjectSkills, toggleProjectSkill } from "@/lib/skills.functions";
 import logo from "@/assets/logo.png";
 
 const STAGE_ICONS = {
@@ -78,7 +79,8 @@ export function ProjectChatWorkspace({
   const queryClient = useQueryClient();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sendState, setSendState] = useState<SendState>({ status: "idle" });
-  const [modelKey, setModelKey] = useState<ModelKey>(DEFAULT_MODEL_KEY);
+  const [mode, setMode] = useState<"dify" | "direct">("dify");
+  const [directModelKey, setDirectModelKey] = useState<string>("");
   const abortRef = useRef<AbortController | null>(null);
 
   const { data: threads = [] } = useQuery({
@@ -92,6 +94,27 @@ export function ProjectChatWorkspace({
     queryKey: ["messages", threadId],
     queryFn: () => getThreadMessages({ data: { threadId } }),
     enabled: !!threadId,
+  });
+
+  const projectId = activeThread?.project_id ?? null;
+
+  const { data: directModels = [] } = useQuery({
+    queryKey: ["direct-models"],
+    queryFn: () => listDirectModels(),
+  });
+
+  const { data: skills = [] } = useQuery({
+    queryKey: ["project-skills", projectId],
+    queryFn: () => listProjectSkills({ data: { projectId: projectId as string } }),
+    enabled: !!projectId,
+  });
+
+  const skillMutation = useMutation({
+    mutationFn: (vars: { skillId: string; enabled: boolean }) =>
+      toggleProjectSkill({
+        data: { projectId: projectId as string, skillId: vars.skillId, enabled: vars.enabled },
+      }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["project-skills", projectId] }),
   });
 
   // Safe config diagnostic: returns only booleans / the non-secret base URL.
@@ -155,7 +178,12 @@ export function ProjectChatWorkspace({
           "Content-Type": "application/json",
           Authorization: `Bearer ${session?.access_token ?? ""}`,
         },
-        body: JSON.stringify({ threadId, message: trimmed, model: modelKey }),
+        body: JSON.stringify({
+          threadId,
+          message: trimmed,
+          executionMode: mode,
+          ...(mode === "direct" && directModelKey ? { model: directModelKey } : {}),
+        }),
         signal: controller.signal,
       });
 
@@ -417,6 +445,22 @@ export function ProjectChatWorkspace({
 
         <div className="border-t border-border bg-background/80 px-4 py-3 backdrop-blur">
           <div className="mx-auto w-full max-w-3xl">
+            {mode === "direct" && projectId && skills.length > 0 && (
+              <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-border bg-secondary/30 px-3 py-2">
+                <span className="text-xs font-medium text-muted-foreground">Skills</span>
+                {skills.map((s) => (
+                  <label key={s.id} className="flex items-center gap-1.5 text-xs">
+                    <Checkbox
+                      checked={s.enabled_for_project}
+                      onCheckedChange={(v) =>
+                        skillMutation.mutate({ skillId: s.id, enabled: Boolean(v) })
+                      }
+                    />
+                    {s.name}
+                  </label>
+                ))}
+              </div>
+            )}
             <PromptInput onSubmit={handleSubmit}>
               <PromptInputTextarea
                 placeholder="描述你的想法，或继续推进当前阶段…"
@@ -424,38 +468,48 @@ export function ProjectChatWorkspace({
                 autoFocus
               />
               <PromptInputFooter className="justify-between">
-                <Select
-                  value={modelKey}
-                  onValueChange={(v) => {
-                    if (isModelKey(v)) setModelKey(v);
-                  }}
-                >
-                  <SelectTrigger
-                    className="h-8 w-auto min-w-40 border-border bg-secondary/60 text-xs"
-                    aria-label="选择模型"
-                  >
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {MODEL_CATALOG.map((m) => (
-                      <SelectItem key={m.key} value={m.key} disabled={m.status !== "enabled"}>
-                        <span className="flex items-center gap-2">
-                          <span>{m.label}</span>
-                          <span
-                            className={cn(
-                              "rounded-full px-1.5 py-0.5 text-[10px]",
-                              m.status === "enabled"
-                                ? "bg-primary/15 text-primary"
-                                : "bg-muted text-muted-foreground",
-                            )}
-                          >
-                            {m.status === "enabled" ? "已启用" : "未启用"}
-                          </span>
-                        </span>
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Select value={mode} onValueChange={(v) => setMode(v as "dify" | "direct")}>
+                    <SelectTrigger
+                      className="h-8 w-auto min-w-32 border-border bg-secondary/60 text-xs"
+                      aria-label="AI 模式"
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="dify">Dify Agent</SelectItem>
+                      <SelectItem value="direct">Direct Model</SelectItem>
+                    </SelectContent>
+                  </Select>
+
+                  {mode === "direct" && (
+                    <Select value={directModelKey} onValueChange={setDirectModelKey}>
+                      <SelectTrigger
+                        className="h-8 w-auto min-w-40 border-border bg-secondary/60 text-xs"
+                        aria-label="选择模型"
+                      >
+                        <SelectValue placeholder="选择模型" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {directModels.length === 0 && (
+                          <SelectItem value="__none__" disabled>
+                            无可用模型
+                          </SelectItem>
+                        )}
+                        {directModels.map((m) => (
+                          <SelectItem key={m.key} value={m.key}>
+                            {m.name}
+                            {m.provider_name ? (
+                              <span className="ml-1 text-[10px] text-muted-foreground">
+                                {m.provider_name}
+                              </span>
+                            ) : null}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  )}
+                </div>
                 <PromptInputSubmit
                   {...(sendState.status === "submitted" || sendState.status === "streaming"
                     ? { status: sendState.status }
@@ -466,9 +520,13 @@ export function ProjectChatWorkspace({
               </PromptInputFooter>
             </PromptInput>
             <p className="mt-2 text-center text-xs text-muted-foreground">
-              {difyStatus?.configured
-                ? "由你的 Dify Agent 驱动 · 左侧可切换项目阶段"
-                : "Dify Agent 状态：未配置"}
+              {mode === "dify"
+                ? difyStatus?.configured
+                  ? "Dify Agent 模式 · 左侧可切换项目阶段"
+                  : "Dify Agent 状态：未配置"
+                : directModels.length === 0
+                  ? "Direct Model：暂无可用模型（需在 Admin 启用 OpenAI 兼容的模型）"
+                  : "Direct Model 模式 · Skills 仅作用于该模式"}
             </p>
           </div>
         </div>
