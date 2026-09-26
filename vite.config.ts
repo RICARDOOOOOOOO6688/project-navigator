@@ -29,6 +29,11 @@ export default defineConfig({
     // nitro/vite builds from this
     server: { entry: "server" },
   },
+  // Deploy target: standard Node server (e.g. Alibaba Cloud Function Compute Node.js 20),
+  // instead of the default cloudflare-module. No business code depends on the preset.
+  nitro: {
+    preset: "node-server",
+  },
   vite: {
     plugins: [loadServerEnv()],
   },
