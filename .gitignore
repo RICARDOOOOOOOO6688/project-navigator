@@ -6,6 +6,7 @@ dist/
 .output/
 .vinxi/
 .wrangler/
+.vercel/
 .tanstack/
 
 # Environment (never commit real secrets)

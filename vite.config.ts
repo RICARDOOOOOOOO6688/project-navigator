@@ -29,10 +29,11 @@ export default defineConfig({
     // nitro/vite builds from this
     server: { entry: "server" },
   },
-  // Deploy target: standard Node server (e.g. Alibaba Cloud Function Compute Node.js 20),
-  // instead of the default cloudflare-module. No business code depends on the preset.
+  // Deploy target: Vercel Build Output API (.vercel/output). Vercel builds the
+  // default branch `main`. The `node-server` branch keeps the Node server preset
+  // for Alibaba Cloud FC / Tencent CloudRun.
   nitro: {
-    preset: "node-server",
+    preset: "vercel",
   },
   vite: {
     plugins: [loadServerEnv()],
