@@ -30,16 +30,16 @@ function createSupabaseFetch(supabaseKey: string): typeof fetch {
 }
 
 function createSupabaseClient() {
-  // Use import.meta.env for client-side (Vite build-time replacement)
-  // Fall back to process.env for SSR (server-side rendering)
-  const SUPABASE_URL = import.meta.env["VITE_SUPABASE_URL"] || process.env["SUPABASE_URL"];
-  const SUPABASE_PUBLISHABLE_KEY =
-    import.meta.env["VITE_SUPABASE_PUBLISHABLE_KEY"] || process.env["SUPABASE_PUBLISHABLE_KEY"];
+  // Browser client: only VITE_-prefixed vars are available (replaced by Vite at
+  // build time). Server-only vars (SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY)
+  // must never be referenced here.
+  const SUPABASE_URL = import.meta.env["VITE_SUPABASE_URL"];
+  const SUPABASE_PUBLISHABLE_KEY = import.meta.env["VITE_SUPABASE_PUBLISHABLE_KEY"];
 
   if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) {
     const missing = [
-      ...(!SUPABASE_URL ? ["SUPABASE_URL"] : []),
-      ...(!SUPABASE_PUBLISHABLE_KEY ? ["SUPABASE_PUBLISHABLE_KEY"] : []),
+      ...(!SUPABASE_URL ? ["VITE_SUPABASE_URL"] : []),
+      ...(!SUPABASE_PUBLISHABLE_KEY ? ["VITE_SUPABASE_PUBLISHABLE_KEY"] : []),
     ];
     const message = `Missing Supabase environment variable(s): ${missing.join(", ")}. Check your .env (see .env.example).`;
     console.error(`[Supabase] ${message}`);
